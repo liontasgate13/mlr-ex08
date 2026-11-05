@@ -3,7 +3,7 @@
 Live leaf classification from the phone's rear camera, running entirely in the
 browser. No server, no install.
 
-**Page: __PAGES_URL__**
+**Page: https://liontasgate13.github.io/mlr-ex08/**
 
 Point your phone camera at a leaf and the four class probabilities update on every
 frame. Works on iPhone (Safari) and on desktop; if the camera is unavailable there is
