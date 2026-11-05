@@ -68,7 +68,12 @@
   #sc-verdict.pass { color: var(--accent); }
   #sc-verdict.fail { color: var(--err); }
   .qr { text-align: center; border-top: 1px solid var(--line); margin-top: 28px; padding-top: 20px; }
-  .qr img { background: #fff; border-radius: 10px; padding: 8px; width: 190px; height: 190px; }
+  /* Displayed 1:1: 222px PNG in a 222px box. box-sizing is border-box globally,
+     so any padding here would shrink the content box and force a rescale, which
+     makes module edges uneven and QR readers fail. The PNG carries its own
+     4-module white quiet zone instead. */
+  .qr img { background: #fff; border-radius: 8px; width: 222px; height: 222px;
+            image-rendering: pixelated; }
   .qr a { color: var(--accent); overflow-wrap: anywhere; font-size: .9rem; }
   .thumb { width: 74px; height: 74px; object-fit: cover; border-radius: 8px; margin-top: 10px; }
 </style>
@@ -109,7 +114,7 @@ preprocessing and model as the live camera, so the upload path is verified too.<
 
 <h2>QR code — opens this page on a phone</h2>
 <section class="qr" id="qr-box">
-  <img id="qr-img" src="qr.png" width="190" height="190"
+  <img id="qr-img" src="qr.png" width="222" height="222"
        alt="QR code that opens the leaf classifier page on a phone">
   <p class="note">Encoded link</p>
   <p><a id="qr-link" href="#">open page</a></p>
