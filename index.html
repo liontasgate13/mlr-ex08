@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Leaf Classifier</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Live leaf classification in the browser with ONNX Runtime Web.">
+<meta name="theme-color" content="#0f1512">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='88'%3E%F0%9F%8D%83%3C/text%3E%3C/svg%3E">
+<!-- onnxruntime-web 1.17.3 aborts on this graph (PyTorch export), so use the same
+     release line as the runtime that produced check_expected.json. numThreads is
+     forced to 1 below, so no SharedArrayBuffer / cross-origin isolation is needed -
+     GitHub Pages does not send COEP. -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1512; --panel: #17201b; --line: #26332c; --ink: #eaf2ec;
+    --dim: #9fb3a6; --accent: #58d68d; --warn: #f0b429; --err: #ef6461;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) 14px max(24px, env(safe-area-inset-bottom));
+    max-width: 620px;
+  }
+  h1 { font-size: 1.2rem; margin: 0 0 2px; }
+  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 24px 0 8px; }
+  .sub { color: var(--dim); font-size: .82rem; margin: 0 0 14px; overflow-wrap: anywhere; }
+  /* Square element + cover = the visible picture *is* the central square crop. */
+  video {
+    display: block; width: 100%; aspect-ratio: 1 / 1; background: #000;
+    border-radius: 12px; object-fit: cover;
+  }
+  .stage { position: relative; }
+  .badge {
+    position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.66);
+    color: #fff; font-size: .74rem; padding: 4px 9px; border-radius: 999px;
+    font-variant-numeric: tabular-nums;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  button, .filebtn {
+    flex: 1 1 130px; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 10px;
+    font: inherit; font-size: .92rem; cursor: pointer; text-align: center;
+  }
+  button.primary { background: var(--accent); color: #08150d; border-color: var(--accent); font-weight: 650; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  /* flex column so `order` can rank the classes by probability */
+  #results { display: flex; flex-direction: column; }
+  .cls { display: grid; grid-template-columns: 6.5rem 1fr 4rem; gap: 9px; align-items: center; padding: 7px 0; }
+  .cls b { font-weight: 600; font-size: .92rem; }
+  .cls .bar { height: 12px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .cls .fill { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px; }
+  .cls.top b { color: var(--accent); }
+  .cls.top .bar { box-shadow: 0 0 0 1px var(--accent); }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; font-size: .88rem; }
+  .note { font-size: .8rem; color: var(--dim); }
+  .status { font-size: .84rem; margin-top: 10px; min-height: 1.2em; }
+  .status.err { color: var(--err); }
+  .status.warn { color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: 6px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line);
+           font-variant-numeric: tabular-nums; }
+  th { color: var(--dim); font-weight: 600; }
+  #sc-verdict { font-weight: 700; }
+  #sc-verdict.pass { color: var(--accent); }
+  #sc-verdict.fail { color: var(--err); }
+  .qr { text-align: center; border-top: 1px solid var(--line); margin-top: 28px; padding-top: 20px; }
+  .qr img { background: #fff; border-radius: 10px; padding: 8px; width: 190px; height: 190px; }
+  .qr a { color: var(--accent); overflow-wrap: anywhere; font-size: .9rem; }
+  .thumb { width: 74px; height: 74px; object-fit: cover; border-radius: 8px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>Leaf Classifier</h1>
+<p class="sub" id="model-meta">loading model…</p>
+
+<div class="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <div class="badge" id="badge">camera off</div>
+</div>
+
+<div class="row">
+  <button id="start" class="primary">Start camera</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="flip" disabled>Switch camera</button>
+</div>
+<div class="row">
+  <label class="filebtn" for="file">Upload photo</label>
+  <input type="file" id="file" accept="image/*">
+</div>
+<p class="status" id="status" role="status"></p>
+<div id="thumb"></div>
+
+<h2>Probability per class</h2>
+<div id="results" aria-live="polite"></div>
+
+<h2>Self-check vs check_expected.json</h2>
+<p class="note">Runs automatically on <code>check_image.jpg</code> through the same
+preprocessing and model as the live camera, so the upload path is verified too.</p>
+<p class="status">Verdict: <span id="sc-verdict">running…</span> <span id="sc-detail" class="note"></span></p>
+<table id="sc-table" hidden>
+  <thead><tr><th>class</th><th>this page</th><th>expected</th><th>|diff|</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<h2>QR code — opens this page on a phone</h2>
+<section class="qr" id="qr-box">
+  <img id="qr-img" src="qr.png" width="190" height="190"
+       alt="QR code that opens the leaf classifier page on a phone">
+  <p class="note">Encoded link</p>
+  <p><a id="qr-link" href="#">open page</a></p>
+</section>
+
+<script>
+'use strict';
+
+// Canonical public URL of this page — the same string qr.png encodes.
+var SITE_URL = '__SITE_URL__';
+
+var ORT_DIST = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
+
+// Mirrors model_info.json; that file wins when it can be fetched.
+var CFG = {
+  classes: ['apple', 'cherry', 'chestnut', 'maple'],
+  input_size: 96,
+  mean: [0.485, 0.456, 0.406],
+  std: [0.229, 0.224, 0.225]
+};
+
+var TOLERANCE = 0.01;   // accepted |probability - expected| in the self-check
+
+var session = null, stream = null, running = false, busy = false;
+// A camera failure can resolve long after it was issued (the user sits on the
+// permission prompt), so remember how many classifications had already happened
+// when the request went out and stay quiet if anything newer has been shown.
+var classifyTick = 0;
+var wantFacing = 'environment';
+var frames = 0, fpsMark = 0;
+var work = document.createElement('canvas'), wctx = null;
+
+var els = {};
+['video', 'badge', 'status', 'results', 'start', 'stop', 'flip', 'file', 'model-meta',
+ 'sc-verdict', 'sc-detail', 'sc-table', 'thumb', 'qr-img', 'qr-link', 'qr-box']
+  .forEach(function (id) { els[id] = document.getElementById(id); });
+
+var video = els.video;
+
+function setStatus(msg, kind) {
+  els.status.textContent = msg || '';
+  els.status.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+/* ---------------------------------------------------------------- model */
+
+async function init() {
+  if (!window.ort || !ort.InferenceSession) {
+    setStatus('Could not load onnxruntime-web from the CDN — check the network connection.', 'err');
+    els.badge.textContent = 'no runtime';
+    return;
+  }
+  ort.env.wasm.wasmPaths = ORT_DIST;
+  ort.env.wasm.numThreads = 1;   // no SharedArrayBuffer on GitHub Pages
+  ort.env.wasm.proxy = false;
+
+  try {
+    var r = await fetch('model_info.json', { cache: 'no-store' });
+    if (r.ok) {
+      var info = await r.json();
+      if (info.classes) CFG.classes = info.classes;
+      if (info.input_size) CFG.input_size = info.input_size;
+      if (info.mean) CFG.mean = info.mean;
+      if (info.std) CFG.std = info.std;
+    }
+  } catch (e) { /* keep the built-in defaults */ }
+
+  buildRows();
+
+  try {
+    session = await ort.InferenceSession.create('leaf_model.onnx', {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all'
+    });
+  } catch (e) {
+    setStatus('Failed to load leaf_model.onnx: ' + e.message, 'err');
+    els.badge.textContent = 'no model';
+    return;
+  }
+
+  work.width = CFG.input_size;
+  work.height = CFG.input_size;
+  wctx = work.getContext('2d', { willReadFrequently: true });
+
+  verifyAgainstModel();
+
+  els['model-meta'].textContent = 'input 1×3×' + CFG.input_size + '×' + CFG.input_size +
+    ' · classes: ' + CFG.classes.join(', ');
+  var tickAt = classifyTick;
+  startCamera().then(function (ok) {
+    if (!ok && classifyTick === tickAt) els.badge.textContent = 'tap Start camera';
+  });
+  runSelfCheck();
+}
+
+// The graph's own shapes are the final say: if model_info.json ever drifts from
+// the model, follow the model (it is what produced the logits) and say so loudly.
+function verifyAgainstModel() {
+  var notes = [];
+  var inMeta = (session.inputMetadata || [])[0];
+  var outMeta = (session.outputMetadata || [])[0];
+
+  if (inMeta && inMeta.shape && inMeta.shape.length === 4) {
+    var sh = inMeta.shape, want = [1, 3, CFG.input_size, CFG.input_size];
+    if (sh.join() !== want.join()) {
+      if (sh[2] > 0 && sh[2] === sh[3]) {
+        notes.push('model input is ' + sh.join('×') + ' not ' + want.join('×') +
+                   ' - using ' + sh[2]);
+        CFG.input_size = sh[2];
+        work.width = work.height = sh[2];
+      } else {
+        notes.push('model input shape ' + sh.join('×') + ' is not 1x3xNxN');
+      }
+    }
+  }
+
+  if (outMeta && outMeta.shape && outMeta.shape.length >= 1) {
+    var k = outMeta.shape[outMeta.shape.length - 1];
+    if (k > 0 && k !== CFG.classes.length) {
+      notes.push('model emits ' + k + ' scores but model_info.json lists ' +
+                 CFG.classes.length + ' labels');
+      if (k < CFG.classes.length) {
+        CFG.classes = CFG.classes.slice(0, k);
+      } else {
+        for (var i = CFG.classes.length; i < k; i++) CFG.classes.push('class ' + i);
+      }
+      buildRows();
+    }
+  }
+
+  if (notes.length) setStatus(notes.join(' · '), 'warn');
+}
+
+/* ------------------------------------------------- preprocessing (one path)
+ central square crop -> resize to input_size -> scale to 0..1
+ -> per-channel (x - mean)/std -> planar CHW, batch of 1. */
+
+function toTensor(srcW, srcH) {
+  var n = CFG.input_size;
+  var side = Math.min(srcW, srcH);
+  var sx = Math.round((srcW - side) / 2);
+  var sy = Math.round((srcH - side) / 2);
+
+  wctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in wctx) wctx.imageSmoothingQuality = 'high';
+  wctx.clearRect(0, 0, n, n);
+  wctx.drawImage(pendingSource, sx, sy, side, side, 0, 0, n, n);
+
+  var data = wctx.getImageData(0, 0, n, n).data;
+  var plane = n * n, t = new Float32Array(plane * 3);
+  var m = CFG.mean, s = CFG.std;
+  for (var i = 0; i < plane; i++) {
+    var p = i * 4;
+    t[i] = (data[p] / 255 - m[0]) / s[0];
+    t[plane + i] = (data[p + 1] / 255 - m[1]) / s[1];
+    t[2 * plane + i] = (data[p + 2] / 255 - m[2]) / s[2];
+  }
+  return t;
+}
+
+// The video / bitmap currently being fed to toTensor().
+var pendingSource = null;
+
+function tensorFrom(src, srcW, srcH) {
+  pendingSource = src;
+  return toTensor(srcW, srcH);
+}
+
+async function classify(tensor) {
+  classifyTick++;
+  var feeds = {};
+  feeds[session.inputNames[0]] =
+    new ort.Tensor('float32', tensor, [1, 3, CFG.input_size, CFG.input_size]);
+  var out = await session.run(feeds);
+  var scores = out[session.outputNames[0]].data;
+  // The graph's last tensor is named "logits", so these are pre-softmax scores.
+  return softmax(scores.subarray(0, CFG.classes.length));
+}
+
+function softmax(v) {
+  var max = -Infinity, i, e = [], sum = 0, out = [];
+  for (i = 0; i < v.length; i++) if (v[i] > max) max = v[i];
+  for (i = 0; i < v.length; i++) { e[i] = Math.exp(v[i] - max); sum += e[i]; }
+  for (i = 0; i < v.length; i++) out.push(e[i] / sum);
+  return out;
+}
+
+/* ------------------------------------------------------------- results UI */
+
+function buildRows() {
+  els.results.textContent = '';
+  CFG.classes.forEach(function (name) {
+    var row = document.createElement('div');
+    row.className = 'cls';
+    row.dataset.name = name;
+    row.innerHTML = '<b></b><span class="bar"><span class="fill"></span></span><span class="pct">—</span>';
+    row.querySelector('b').textContent = name;
+    els.results.appendChild(row);
+  });
+}
+
+function render(probs) {
+  var rank = probs.map(function (p, i) { return i; })
+                  .sort(function (a, b) { return probs[b] - probs[a]; });
+  Array.prototype.forEach.call(els.results.children, function (row) {
+    var j = CFG.classes.indexOf(row.dataset.name);
+    var pct = (probs[j] * 100).toFixed(1) + '%';
+    row.querySelector('.fill').style.width = pct;
+    row.querySelector('.pct').textContent = pct;
+    row.style.order = rank.indexOf(j);
+    row.classList.toggle('top', rank[0] === j);
+  });
+}
+
+/* ---------------------------------------------------------------- camera */
+
+async function openStream(facing) {
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    throw new Error('no-getusermedia');
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 1280 } }
+    });
+  } catch (e) {
+    // Older Safari builds can reject the shaped constraint; ask for anything.
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+  }
+}
+
+async function startCamera() {
+  var tickAt = classifyTick;
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    setStatus('This browser cannot access a camera (no getUserMedia). Use "Upload photo"; ' +
+              'the camera also needs an HTTPS page.', 'warn');
+    return false;
+  }
+  stopCamera();
+  try {
+    stream = await openStream(wantFacing);
+  } catch (e) {
+    var why = e && e.name === 'NotAllowedError' ? 'permission denied'
+            : e && e.name === 'NotFoundError' ? 'no camera found'
+            : (e && e.message) || 'could not start';
+    // Something newer already spoke (a photo was classified); don't talk over it.
+    if (classifyTick === tickAt) {
+      setStatus('Camera: ' + why + '. "Upload photo" still works.', 'err');
+    }
+    return false;
+  }
+  video.setAttribute('playsinline', '');
+  video.muted = true;
+  video.srcObject = stream;
+  try {
+    await video.play();                       // iOS: needs to follow a user gesture
+  } catch (e) {
+    await new Promise(function (res) { video.addEventListener('loadedmetadata', res, { once: true }); });
+    try { await video.play(); } catch (e2) { /* the loop retries on its own */ }
+  }
+  running = true;
+  els.start.disabled = true;
+  els.stop.disabled = false;
+  els.flip.disabled = false;
+  els.badge.textContent = 'classifying…';
+  frames = 0; fpsMark = 0;
+  setStatus('');
+  requestAnimationFrame(loop);
+  return true;
+}
+
+function stopCamera() {
+  running = false;
+  if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  video.srcObject = null;
+  els.start.disabled = false;
+  els.stop.disabled = true;
+  els.flip.disabled = true;
+  els.badge.textContent = 'camera off';
+}
+
+async function loop() {
+  if (!running) return;
+  if (!busy && session && video.readyState >= 2 && video.videoWidth > 0) {
+    busy = true;
+    try {
+      var t0 = performance.now();
+      var probs = await classify(tensorFrom(video, video.videoWidth, video.videoHeight));
+      render(probs);
+      frames++;
+      var now = performance.now();
+      if (!fpsMark) fpsMark = now;
+      if (now - fpsMark >= 1000) {
+        els.badge.textContent = (frames * 1000 / (now - fpsMark)).toFixed(1) +
+          ' fps · ' + (now - t0).toFixed(0) + ' ms';
+        frames = 0; fpsMark = now;
+      }
+    } catch (e) {
+      running = false;
+      els.badge.textContent = 'error';
+      setStatus('Inference error: ' + e.message, 'err');
+    } finally {
+      busy = false;
+    }
+  }
+  if (running) requestAnimationFrame(loop);
+}
+
+/* ------------------------------------------- photo upload (camera fallback) */
+
+function loadBitmap(file) {
+  if (self.createImageBitmap) {
+    // from-image applies the EXIF orientation phones store in JPEGs.
+    return createImageBitmap(file, { imageOrientation: 'from-image' })
+      .catch(function () { return createImageBitmap(file); });
+  }
+  return new Promise(function (res, rej) {
+    var img = new Image(), url = URL.createObjectURL(file);
+    img.onload = function () { URL.revokeObjectURL(url); res(img); };
+    img.onerror = function () { URL.revokeObjectURL(url); rej(new Error('could not decode image')); };
+    img.src = url;
+  });
+}
+
+function sourceSize(src) {
+  return [src.width || src.naturalWidth, src.height || src.naturalHeight];
+}
+
+async function classifyFile(file) {
+  if (!session) { setStatus('The model is still loading — try again in a moment.', 'warn'); return; }
+  var bmp = await loadBitmap(file);
+  var size = sourceSize(bmp);
+  var probs = await classify(tensorFrom(bmp, size[0], size[1]));
+  render(probs);
+
+  els.thumb.textContent = '';
+  var thumb = document.createElement('img');
+  thumb.className = 'thumb';
+  thumb.alt = 'the photo you classified';
+  thumb.src = URL.createObjectURL(file);
+  els.thumb.appendChild(thumb);
+
+  els.badge.textContent = 'from photo';
+  setStatus('Classified "' + file.name + '" (' + size[0] + '×' + size[1] +
+            ', centre square used).');
+}
+
+/* ---------------------------------- self-check against check_expected.json */
+
+async function runSelfCheck() {
+  var verdict = els['sc-verdict'], detail = els['sc-detail'];
+  if (!session) { verdict.textContent = 'skipped (no model)'; verdict.className = 'fail'; return; }
+  try {
+    var imgResp = await fetch('check_image.jpg', { cache: 'no-store' });
+    if (!imgResp.ok) throw new Error('check_image.jpg -> HTTP ' + imgResp.status);
+    var expected = await (await fetch('check_expected.json', { cache: 'no-store' })).json();
+
+    var bmp = await loadBitmap(await imgResp.blob());
+    var size = sourceSize(bmp);
+    var probs = await classify(tensorFrom(bmp, size[0], size[1]));
+
+    var maxDev = 0;
+    var tbody = els['sc-table'].querySelector('tbody');
+    tbody.textContent = '';
+    CFG.classes.forEach(function (name, i) {
+      var got = probs[i], exp = expected[name];
+      var dev = (typeof exp === 'number') ? Math.abs(got - exp) : NaN;
+      if (dev > maxDev) maxDev = dev;
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td></td><td></td><td></td><td></td>';
+      tr.cells[0].textContent = name;
+      tr.cells[1].textContent = got.toFixed(6);
+      tr.cells[2].textContent = (typeof exp === 'number') ? exp.toFixed(6) : '—';
+      tr.cells[3].textContent = isNaN(dev) ? '—' : dev.toExponential(2);
+      tbody.appendChild(tr);
+    });
+    els['sc-table'].hidden = false;
+    els['sc-table'].dataset.maxdev = String(maxDev);
+
+    var missing = Object.keys(expected).filter(function (k) {
+      return CFG.classes.indexOf(k) === -1;
+    });
+    var ok = missing.length === 0 && maxDev <= TOLERANCE;
+    verdict.textContent = ok ? 'PASS' : 'FAIL';
+    verdict.className = ok ? 'pass' : 'fail';
+    detail.textContent = 'max |diff| = ' + maxDev.toExponential(3) +
+      ' (tolerance ' + TOLERANCE + ')' +
+      (missing.length ? ' · expected classes the model cannot output: ' + missing.join(', ') : '');
+    els['qr-box'].dataset.selfcheck = verdict.textContent;
+  } catch (e) {
+    verdict.textContent = 'error';
+    verdict.className = 'fail';
+    detail.textContent = e.message;
+    els['qr-box'].dataset.selfcheck = 'error';
+  }
+}
+
+/* --------------------------------------------------------------- QR / link */
+
+function showQrTarget() {
+  var url = (SITE_URL.indexOf('__') === 0) ? location.href : SITE_URL;
+  els['qr-link'].href = url;
+  els['qr-link'].textContent = url;
+  els['qr-box'].dataset.qrUrl = url;
+}
+
+/* ------------------------------------------------------------------ wiring */
+
+els.start.addEventListener('click', function () { startCamera(); });
+els.stop.addEventListener('click', stopCamera);
+els.flip.addEventListener('click', function () {
+  wantFacing = (wantFacing === 'environment') ? 'user' : 'environment';
+  startCamera();
+});
+els.file.addEventListener('change', function (ev) {
+  var f = ev.target.files && ev.target.files[0];
+  ev.target.value = '';
+  if (!f) return;
+  stopCamera();
+  classifyFile(f).catch(function (e) {
+    setStatus('Could not classify that file: ' + e.message, 'err');
+  });
+});
+document.addEventListener('visibilitychange', function () { if (document.hidden) stopCamera(); });
+
+showQrTarget();
+if (location.protocol === 'file:') {
+  setStatus('Opened straight from disk: the model, the camera and the self-check need ' +
+            'http(s). Serve this folder (python -m http.server) or use the GitHub Pages URL.', 'warn');
+}
+init();
+</script>
+</body>
+</html>

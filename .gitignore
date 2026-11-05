@@ -1,0 +1,10 @@
+# Training/validation images stay out of the repo — the page never needs them.
+ex08_leaves_images/
+
+# The original drop folder; the page uses the copies at the repo root.
+ex08_for_agent/
+
+# Scratch files from local verification, never part of the site.
+orttest.html
+croptest.png
+*.log
